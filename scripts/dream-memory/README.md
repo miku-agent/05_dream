@@ -6,11 +6,15 @@
 - 전날(KST 기준) 세션 파일 탐색
 - `.jsonl` 세션 로그 파싱
 - explainable project hint detection (Phase 1)
+  - `cwd`에서는 workspace/app root로 보이는 segment와 known project alias를 우선 사용
+  - text에서는 known alias, numbered project dir(`05_dream`), 또는 project/repo context가 분명한 slug만 채택
 - 기초 importance scoring
 - candidate extraction
 - promotion / retention 후보 판단
 - `tmp/dream-memory/YYYY-MM-DD.report.json` 리포트 출력
-- `memory/` 폴더 bootstrap
+- `MEMORY.md` + `memory/` 폴더 bootstrap
+- project-aware markdown promotion target resolution
+- entry slug marker 기반 merge/replace idempotent write
 - **옵션으로 Supabase raw/archive 분석 결과 insert/upsert**
   - `dream_jobs`
   - `dream_sessions`
@@ -19,7 +23,9 @@
   - `dream_promotions`
 - **옵션으로 markdown promotion write**
   - `--promote=true`
-  - snapshot backup 후 append
+  - snapshot backup 후 section-aware merge/replace
+  - 동일 `entry_slug` 재실행 시 duplicate append 대신 replace/no-op
+  - project-linked candidate는 `memory/projects/<slug>.md`로, stable preference / operation rule은 `MEMORY.md`로 승격
 - **옵션으로 purge dry-run 계획 생성**
   - `--purge=true`
   - 실제 삭제 없이 retention 기반 정리 후보만 계산
@@ -79,9 +85,14 @@ node scripts/dream-memory/nightly.mjs --date 2026-03-12 --dry-run=false --archiv
 ## Notes
 
 - Phase 1 project-awareness currently adds `primaryProjectHint`, `projectHints`, and `projectSignals` into discovered session/report data.
+- To reduce report noise, unknown slug-like tokens from text are only kept when they are numbered project dirs, repeated, or appear in explicit `project`/`repo` context.
+- `cwd`-based detection is conservative: it prefers workspace/app-root project directories and ignores nested tool/script segments such as `scripts/dream-memory`.
 - High-confidence project persistence is available in the writer path.
 - Session-project links persist to `dream_session_projects`.
 - Candidate-project links now also persist to `dream_candidate_projects`.
+- `dream_promotions` row의 `target_file`, `target_section`, `entry_slug`, `promotion_mode`는 실제 markdown writer가 사용하는 경로/전략과 동일하게 계산된다.
+- markdown writer는 `<!-- dream-memory:entry ... -->` marker를 사용해 기존 entry를 찾아 replace하며, 동일 내용 재실행은 no-op로 처리한다.
+- Archive summary now reports `rowsRequested` and `rowsReturned` with `semantics: "upsert_returned_rows"` so the output matches Supabase upsert behavior more accurately. Legacy `*Inserted` aliases are still included for compatibility.
 - The v1 project schema extension (`supabase/dream_memory_v1_projects.sql`) must be applied before `--archive=true` is used for these paths.
 
 ## Next

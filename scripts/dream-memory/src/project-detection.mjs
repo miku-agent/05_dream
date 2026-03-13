@@ -14,6 +14,13 @@ const GENERIC_SEGMENTS = new Set([
   'dist',
   'build',
   'node_modules',
+  'scripts',
+  'script',
+  'test',
+  'tests',
+  'docs',
+  'doc',
+  'lib',
 ]);
 
 const GENERIC_SLUGS = new Set([
@@ -24,6 +31,21 @@ const GENERIC_SLUGS = new Set([
   'repo',
   'dream',
 ]);
+
+const PROJECT_CONTEXT_WORDS = [
+  'project',
+  'projects',
+  'repo',
+  'repository',
+  'workspace',
+  'app',
+  'service',
+  'memory/projects',
+  'worktree',
+  'cwd',
+  'dir',
+  'directory',
+];
 
 export function inferProjectHints({ cwd, messages = [], sampleUserText = '', fileName = '', knownProjects = [] }) {
   const signals = [];
@@ -91,24 +113,27 @@ function inferFromCwd(cwd, registry) {
   const normalized = String(cwd || '').trim();
   if (!normalized) return [];
 
-  const segments = normalized
+  const rawSegments = normalized
     .split(path.sep)
     .map((segment) => String(segment).trim())
-    .filter(Boolean)
-    .filter((segment) => !GENERIC_SEGMENTS.has(segment.toLowerCase()));
+    .filter(Boolean);
 
   const signals = [];
-  for (const segment of segments) {
+  const candidateSegments = pickProjectSegmentsFromPath(rawSegments, registry);
+
+  for (const segment of candidateSegments) {
     const slug = normalizeProjectToken(segment);
     if (!slug || GENERIC_SLUGS.has(slug)) continue;
 
     const known = matchKnownProject(slug, registry);
+    if (!known && !looksLikeNumberedProjectSegment(segment)) continue;
+
     signals.push({
       slug: known?.slug || slug,
       label: known?.name || segment,
       source: 'cwd',
-      signalType: 'path_segment',
-      confidence: known ? 0.96 : 0.82,
+      signalType: known ? 'project_root_segment' : 'numbered_project_segment',
+      confidence: known ? 0.97 : 0.9,
       matchedText: segment,
     });
   }
@@ -116,12 +141,43 @@ function inferFromCwd(cwd, registry) {
   return dedupeSignals(signals);
 }
 
+function pickProjectSegmentsFromPath(segments, registry) {
+  const candidates = [];
+
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index];
+    const lowered = segment.toLowerCase();
+    if (GENERIC_SEGMENTS.has(lowered)) continue;
+
+    const previous = index > 0 ? segments[index - 1].toLowerCase() : '';
+    const slug = normalizeProjectToken(segment);
+    const isKnown = Boolean(matchKnownProject(slug, registry));
+    const isNumbered = looksLikeNumberedProjectSegment(segment);
+    const isWorkspaceRootChild = previous === 'workspace' || previous === 'apps';
+
+    if (isKnown || isNumbered || isWorkspaceRootChild) {
+      candidates.push(segment);
+    }
+  }
+
+  if (candidates.length > 0) return candidates;
+
+  const basename = segments.at(-1);
+  if (!basename) return [];
+  const basenameSlug = normalizeProjectToken(basename);
+  if (matchKnownProject(basenameSlug, registry)) return [basename];
+  if (looksLikeNumberedProjectSegment(basename)) return [basename];
+  return [];
+}
+
 function inferFromText(text, registry) {
-  const normalizedText = String(text || '').toLowerCase();
+  const originalText = String(text || '');
+  const normalizedText = originalText.toLowerCase();
   if (!normalizedText) return [];
 
   const signals = [];
   const tokens = tokenize(normalizedText);
+  const tokenCounts = countNormalizedTokens(tokens);
 
   for (const token of tokens) {
     const slug = normalizeProjectToken(token);
@@ -140,19 +196,96 @@ function inferFromText(text, registry) {
       continue;
     }
 
-    if (looksLikeProjectSlug(slug)) {
-      signals.push({
-        slug,
-        label: token,
-        source: 'text',
-        signalType: 'slug_pattern',
-        confidence: 0.58,
-        matchedText: token,
-      });
-    }
+    if (!shouldPromoteUnknownTextSlug(token, slug, normalizedText, tokenCounts)) continue;
+
+    signals.push({
+      slug,
+      label: token,
+      source: 'text',
+      signalType: 'contextual_slug_pattern',
+      confidence: 0.64,
+      matchedText: token,
+    });
   }
 
   return dedupeSignals(signals);
+}
+
+function shouldPromoteUnknownTextSlug(token, slug, text, tokenCounts) {
+  if (!looksLikeProjectSlug(slug)) return false;
+  if (looksLikeOperationalSlug(slug)) return false;
+  if (looksLikeNumberedProjectSegment(token)) return true;
+
+  const count = tokenCounts.get(slug) || 0;
+  if (count >= 2) return true;
+
+  return hasProjectContext(text, token);
+}
+
+function countNormalizedTokens(tokens) {
+  const counts = new Map();
+  for (const token of tokens || []) {
+    const slug = normalizeProjectToken(token);
+    if (!slug) continue;
+    counts.set(slug, (counts.get(slug) || 0) + 1);
+  }
+  return counts;
+}
+
+function hasProjectContext(text, token) {
+  const escapedToken = escapeRegExp(String(token || '').toLowerCase());
+  if (!escapedToken) return false;
+
+  const pathPattern = new RegExp(`(?:^|[\\s'"])${escapedToken}(?:\\.git|/|\\b)`);
+  if (pathPattern.test(text)) return true;
+
+  return PROJECT_CONTEXT_WORDS.some((word) => {
+    const escapedWord = escapeRegExp(word);
+    const patterns = [
+      new RegExp(`${escapedWord}[^\\n]{0,40}${escapedToken}`),
+      new RegExp(`${escapedToken}[^\\n]{0,40}${escapedWord}`),
+    ];
+    return patterns.some((pattern) => pattern.test(text));
+  });
+}
+
+function looksLikeOperationalSlug(value) {
+  const parts = String(value || '')
+    .split(/[-_]/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  if (parts.length < 2) return false;
+
+  const operationalWords = new Set([
+    'topic',
+    'sample',
+    'samples',
+    'test',
+    'tests',
+    'spec',
+    'specs',
+    'noop',
+    'no',
+    'op',
+    'archive',
+    'summary',
+    'promotion',
+    'promote',
+    'inserted',
+    'updated',
+    'writer',
+    'runner',
+    'script',
+    'task',
+  ]);
+
+  const operationalCount = parts.filter((part) => operationalWords.has(part)).length;
+  return operationalCount >= Math.max(2, parts.length - 1);
+}
+
+function looksLikeNumberedProjectSegment(value) {
+  return /^\d{2}_[a-z0-9][a-z0-9_-]*$/i.test(String(value || '').trim());
 }
 
 function matchKnownProject(slug, registry) {
@@ -244,4 +377,8 @@ function slugify(value) {
     .replace(/[^a-z0-9_-]+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-+|-+$/g, '');
+}
+
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

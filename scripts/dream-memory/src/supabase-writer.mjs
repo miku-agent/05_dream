@@ -50,8 +50,9 @@ export async function persistArchiveReport(report, config) {
   const projectIdBySlug = new Map((projects || []).map((row) => [row.slug, row.id]));
 
   const sessionProjectRows = buildDreamSessionProjectRows(report, sessionIdByExternalId, projectIdBySlug);
+  let sessionProjects = [];
   if (sessionProjectRows.length > 0) {
-    await client.request('dream_session_projects', {
+    sessionProjects = await client.request('dream_session_projects', {
       method: 'POST',
       query: '?on_conflict=session_id,project_id',
       headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
@@ -60,8 +61,9 @@ export async function persistArchiveReport(report, config) {
   }
 
   const messageRows = buildDreamMessages(report, sessionIdByExternalId);
+  let messages = [];
   if (messageRows.length > 0) {
-    await client.request('dream_messages', {
+    messages = await client.request('dream_messages', {
       method: 'POST',
       query: '?on_conflict=session_id,seq_no',
       headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
@@ -70,9 +72,9 @@ export async function persistArchiveReport(report, config) {
   }
 
   const candidateRows = buildDreamMemoryCandidateRows(report, sessionIdByExternalId);
-  let candidateInsertResult = [];
+  let candidates = [];
   if (candidateRows.length > 0) {
-    candidateInsertResult = await client.request('dream_memory_candidates', {
+    candidates = await client.request('dream_memory_candidates', {
       method: 'POST',
       query: '?on_conflict=session_id,kind,title',
       headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
@@ -81,14 +83,15 @@ export async function persistArchiveReport(report, config) {
   }
 
   const candidateIdByFingerprint = new Map(
-    candidateInsertResult
+    candidates
       .filter((row) => row.content_fingerprint)
       .map((row) => [row.content_fingerprint, row.id])
   );
 
   const candidateProjectRows = buildDreamCandidateProjectRows(report, candidateIdByFingerprint, projectIdBySlug);
+  let candidateProjects = [];
   if (candidateProjectRows.length > 0) {
-    await client.request('dream_candidate_projects', {
+    candidateProjects = await client.request('dream_candidate_projects', {
       method: 'POST',
       query: '?on_conflict=candidate_id,project_id',
       headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
@@ -97,8 +100,9 @@ export async function persistArchiveReport(report, config) {
   }
 
   const promotionRows = buildDreamPromotionRows(report, sessionIdByExternalId, candidateIdByFingerprint);
+  let promotions = [];
   if (promotionRows.length > 0) {
-    await client.request('dream_promotions', {
+    promotions = await client.request('dream_promotions', {
       method: 'POST',
       query: '?on_conflict=session_id,entry_slug',
       headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
@@ -106,16 +110,68 @@ export async function persistArchiveReport(report, config) {
     });
   }
 
-  return {
+  return summarizeArchivePersistence({
     job,
-    sessionsInserted: sessions.length,
-    projectsInserted: projectRows.length,
-    sessionProjectsInserted: sessionProjectRows.length,
-    candidateProjectsInserted: candidateProjectRows.length,
-    messagesInserted: messageRows.length,
-    candidatesInserted: candidateRows.length,
-    promotionsInserted: promotionRows.length,
+    requestedRows: {
+      sessions: report.sessions?.length || 0,
+      projects: projectRows.length,
+      sessionProjects: sessionProjectRows.length,
+      candidateProjects: candidateProjectRows.length,
+      messages: messageRows.length,
+      candidates: candidateRows.length,
+      promotions: promotionRows.length,
+    },
+    returnedRows: {
+      sessions: sessions.length,
+      projects: projects.length,
+      sessionProjects: sessionProjects.length,
+      candidateProjects: candidateProjects.length,
+      messages: messages.length,
+      candidates: candidates.length,
+      promotions: promotions.length,
+    },
+  });
+}
+
+export function summarizeArchivePersistence({ job, requestedRows = {}, returnedRows = {} }) {
+  const summary = {
+    job,
+    semantics: 'upsert_returned_rows',
+    rowsRequested: normalizeRowCounterMap(requestedRows),
+    rowsReturned: normalizeRowCounterMap(returnedRows),
   };
+
+  const legacyAliases = {
+    sessionsInserted: summary.rowsReturned.sessions,
+    projectsInserted: summary.rowsReturned.projects,
+    sessionProjectsInserted: summary.rowsReturned.sessionProjects,
+    candidateProjectsInserted: summary.rowsReturned.candidateProjects,
+    messagesInserted: summary.rowsReturned.messages,
+    candidatesInserted: summary.rowsReturned.candidates,
+    promotionsInserted: summary.rowsReturned.promotions,
+  };
+
+  return {
+    ...summary,
+    legacyAliases,
+    ...legacyAliases,
+  };
+}
+
+function normalizeRowCounterMap(value) {
+  return {
+    sessions: numberOrZero(value.sessions),
+    projects: numberOrZero(value.projects),
+    sessionProjects: numberOrZero(value.sessionProjects),
+    candidateProjects: numberOrZero(value.candidateProjects),
+    messages: numberOrZero(value.messages),
+    candidates: numberOrZero(value.candidates),
+    promotions: numberOrZero(value.promotions),
+  };
+}
+
+function numberOrZero(value) {
+  return Number.isFinite(value) ? value : 0;
 }
 
 async function upsertDreamJob(client, report) {
@@ -167,7 +223,7 @@ async function upsertDreamSessions(client, report, jobId) {
     char_count: session.charCount,
     archive_status: 'archived',
     analysis_status: 'analyzed',
-    promotion_status: mapPromotionStatus(session.promotionDecision),
+    promotion_status: mapPromotionStatus(session.effectivePromotionDecision || session.promotionDecision),
     importance_score: session.importanceScore,
     importance_band: normalizeImportanceBand(session.importanceBand),
     retention_class: session.retentionClass,
@@ -368,13 +424,13 @@ function buildDreamPromotionRows(report, sessionIdByExternalId, candidateIdByFin
         externalSessionId: promotion.externalSessionId,
         kind: promotion.kind,
         title: promotion.title,
+        writeApplied: promotion.writeApplied ?? null,
       },
     });
   }
 
   return rows;
 }
-
 
 function buildProjectAliases(hint) {
   const values = new Set([hint.slug, hint.label].filter(Boolean).map((value) => String(value).trim().toLowerCase()));
