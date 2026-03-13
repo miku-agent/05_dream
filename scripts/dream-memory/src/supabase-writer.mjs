@@ -86,6 +86,16 @@ export async function persistArchiveReport(report, config) {
       .map((row) => [row.content_fingerprint, row.id])
   );
 
+  const candidateProjectRows = buildDreamCandidateProjectRows(report, candidateIdByFingerprint, projectIdBySlug);
+  if (candidateProjectRows.length > 0) {
+    await client.request('dream_candidate_projects', {
+      method: 'POST',
+      query: '?on_conflict=candidate_id,project_id',
+      headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
+      body: candidateProjectRows,
+    });
+  }
+
   const promotionRows = buildDreamPromotionRows(report, sessionIdByExternalId, candidateIdByFingerprint);
   if (promotionRows.length > 0) {
     await client.request('dream_promotions', {
@@ -101,6 +111,7 @@ export async function persistArchiveReport(report, config) {
     sessionsInserted: sessions.length,
     projectsInserted: projectRows.length,
     sessionProjectsInserted: sessionProjectRows.length,
+    candidateProjectsInserted: candidateProjectRows.length,
     messagesInserted: messageRows.length,
     candidatesInserted: candidateRows.length,
     promotionsInserted: promotionRows.length,
@@ -279,6 +290,58 @@ function buildDreamMemoryCandidateRows(report, sessionIdByExternalId) {
         source_message_ids: candidate.sourceMessageIds,
         content_fingerprint: candidate.contentFingerprint,
       });
+    }
+  }
+
+  return rows;
+}
+
+function buildDreamCandidateProjectRows(report, candidateIdByFingerprint, projectIdBySlug) {
+  const rows = [];
+
+  for (const session of report.sessions || []) {
+    for (const candidate of session.candidates || []) {
+      const candidateId = candidateIdByFingerprint.get(candidate.contentFingerprint);
+      if (!candidateId) continue;
+
+      const seenProjectSlugs = new Set();
+      const candidateProjectHints = [];
+
+      if (candidate.primaryProject?.slug) {
+        candidateProjectHints.push({
+          ...candidate.primaryProject,
+          inferredPrimary: true,
+        });
+      }
+
+      for (const link of candidate.projectLinks || []) {
+        candidateProjectHints.push(link);
+      }
+
+      for (const hint of candidateProjectHints) {
+        if (!hint?.slug || seenProjectSlugs.has(hint.slug)) continue;
+        if ((hint.confidence || 0) < PROJECT_LINK_MIN_CONFIDENCE) continue;
+
+        const projectId = projectIdBySlug.get(hint.slug);
+        if (!projectId) continue;
+
+        seenProjectSlugs.add(hint.slug);
+        rows.push({
+          candidate_id: candidateId,
+          project_id: projectId,
+          link_source: 'inherited',
+          confidence_score: hint.confidence,
+          reason_json: {
+            primaryProject: candidate.primaryProject?.slug === hint.slug,
+            sources: hint.sources || [],
+            signalTypes: hint.signalTypes || [],
+            matchedTexts: hint.matchedTexts || [],
+            evidenceCount: hint.evidenceCount || 0,
+            candidateKind: candidate.kind || null,
+            candidateTitle: candidate.title || null,
+          },
+        });
+      }
     }
   }
 
