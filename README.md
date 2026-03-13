@@ -235,6 +235,13 @@ It is **not** trying to be:
 
 ---
 
+## Design documents
+
+- `docs/dream-memory-system-v0.md` — original v0 direction
+- `docs/dream-memory-v1-architecture.md` — refined v1 architecture based on the broader long-term memory philosophy
+
+---
+
 ## Roadmap
 
 ### Near term
