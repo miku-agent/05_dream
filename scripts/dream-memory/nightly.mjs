@@ -24,6 +24,7 @@ async function main() {
     startMs: window.startMs,
     endMs: window.endMs,
     limit: config.limit,
+    knownProjects: config.knownProjects,
   });
 
   const analyzed = analyzeSessions(discovered.sessions, { targetDate: window.date }).map((session) => {
@@ -53,6 +54,12 @@ async function main() {
       filesScanned: discovered.filesScanned,
       sessionsMatched: analyzed.length,
       candidatesExtracted: analyzed.reduce((sum, s) => sum + ((s.candidates || []).length), 0),
+      projectsDetected: countDistinctProjects(analyzed),
+      sessionsWithProjectLinks: analyzed.filter((s) => (s.projectHints || []).length > 0).length,
+      candidatesWithProjectLinks: analyzed.reduce((sum, s) => {
+        const hasProjects = (s.projectHints || []).length > 0;
+        return sum + (hasProjects ? ((s.candidates || []).length) : 0);
+      }, 0),
       promotionsPlanned: promotions.length,
       purgeCandidates: (purge.actions || []).filter((action) => action.action === 'purge_candidate').length,
       keep: (purge.actions || []).filter((action) => action.action === 'keep').length,
@@ -97,6 +104,16 @@ function deriveEffectivePromotionDecision(baseDecision, candidates) {
   if (decisions.has('defer')) return 'defer';
   if (decisions.has('archive_only')) return 'archive_only';
   return baseDecision;
+}
+
+function countDistinctProjects(sessions) {
+  const slugs = new Set();
+  for (const session of sessions || []) {
+    for (const hint of session.projectHints || []) {
+      if (hint?.slug) slugs.add(hint.slug);
+    }
+  }
+  return slugs.size;
 }
 
 main().catch((error) => {

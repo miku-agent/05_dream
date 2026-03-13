@@ -1,8 +1,9 @@
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { summarizeMeaningfulText } from './text-cleaning.mjs';
+import { inferProjectHints } from './project-detection.mjs';
 
-export async function discoverSessionsForDate({ sessionsDir, startMs, endMs, limit = null }) {
+export async function discoverSessionsForDate({ sessionsDir, startMs, endMs, limit = null, knownProjects = [] }) {
   const names = await readdir(sessionsDir);
   const files = names
     .filter((name) => name.endsWith('.jsonl'))
@@ -21,7 +22,7 @@ export async function discoverSessionsForDate({ sessionsDir, startMs, endMs, lim
     const transcript = await readJsonl(filePath);
     if (transcript.length === 0) continue;
 
-    const session = normalizeSessionFile(name, transcript, filePath);
+    const session = normalizeSessionFile(name, transcript, filePath, { knownProjects });
     if (!session.lastMessageAtMs) continue;
     if (session.lastMessageAtMs < startMs || session.lastMessageAtMs > endMs) continue;
 
@@ -47,7 +48,7 @@ async function readJsonl(filePath) {
     .filter(Boolean);
 }
 
-function normalizeSessionFile(fileName, rows, filePath) {
+function normalizeSessionFile(fileName, rows, filePath, { knownProjects = [] } = {}) {
   const sessionRow = rows.find((row) => row.type === 'session') || rows[0];
   const messageRows = rows.filter((row) => row.type === 'message' && row.message);
 
@@ -70,6 +71,13 @@ function normalizeSessionFile(fileName, rows, filePath) {
     acc[message.role] = (acc[message.role] || 0) + 1;
     return acc;
   }, {});
+  const projectDetection = inferProjectHints({
+    cwd: sessionRow.cwd || null,
+    messages: normalizedMessages,
+    sampleUserText: meaningfulUserText,
+    fileName,
+    knownProjects,
+  });
 
   return {
     externalSessionId: sessionRow.id || fileName.replace(/\.jsonl$/, ''),
@@ -87,6 +95,9 @@ function normalizeSessionFile(fileName, rows, filePath) {
     sampleUserText: meaningfulUserText,
     messages: normalizedMessages,
     transcriptChecksum: buildTranscriptChecksum(normalizedMessages),
+    primaryProjectHint: projectDetection.primaryProjectHint,
+    projectHints: projectDetection.projectHints,
+    projectSignals: projectDetection.projectSignals,
   };
 }
 

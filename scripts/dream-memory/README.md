@@ -5,6 +5,7 @@
 현재 포함 범위:
 - 전날(KST 기준) 세션 파일 탐색
 - `.jsonl` 세션 로그 파싱
+- explainable project hint detection (Phase 1)
 - 기초 importance scoring
 - candidate extraction
 - promotion / retention 후보 판단
@@ -75,8 +76,15 @@ node scripts/dream-memory/nightly.mjs --date 2026-03-12 --dry-run=false --archiv
 - `--promote true|false`
 - `--purge true|false`
 
+## Notes
+
+- Phase 1 project-awareness currently adds `primaryProjectHint`, `projectHints`, and `projectSignals` into discovered session/report data.
+- This step is intentionally non-destructive: it does **not** persist project links to Supabase yet.
+- The next implementation step is persisting high-confidence session-project links.
+
 ## Next
 
-1. purge 실행기 추가
-2. cron 연결
-3. promotion merge/replace 고도화
+1. persist high-confidence session-project links
+2. purge 실행기 추가
+3. cron 연결
+4. promotion merge/replace 고도화

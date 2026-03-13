@@ -52,6 +52,7 @@ export function loadConfig(args = {}) {
     writePromotions,
     purgeDryRun,
     limit,
+    knownProjects: loadKnownProjects(workspaceRoot),
     supabaseUrl: process.env.DREAM_SUPABASE_URL || envBridge.supabaseUrl || '',
     supabaseKey: process.env.DREAM_SUPABASE_SERVICE_ROLE_KEY || envBridge.supabaseKey || '',
   };
@@ -84,6 +85,33 @@ function loadSupabaseBridgeEnv(workspaceRoot) {
     supabaseUrl: parsed.API_EXTERNAL_URL || '',
     supabaseKey: parsed.SERVICE_ROLE_KEY || '',
   };
+}
+
+function loadKnownProjects(workspaceRoot) {
+  try {
+    const names = fs.readdirSync(workspaceRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .filter((name) => /^\d{2}_[a-z0-9][a-z0-9_-]*$/i.test(name));
+
+    return names.map((name) => ({
+      slug: name.toLowerCase(),
+      name,
+      aliases: buildProjectAliases(name),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function buildProjectAliases(name) {
+  const lowered = String(name || '').toLowerCase();
+  const aliases = new Set([lowered]);
+  const withoutPrefix = lowered.replace(/^\d{2}_/, '');
+  if (withoutPrefix && withoutPrefix !== lowered) aliases.add(withoutPrefix);
+  aliases.add(lowered.replace(/_/g, '-'));
+  if (withoutPrefix) aliases.add(withoutPrefix.replace(/_/g, '-'));
+  return Array.from(aliases).filter(Boolean);
 }
 
 function safeParseEnvFile(filePath) {

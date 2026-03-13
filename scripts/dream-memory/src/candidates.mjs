@@ -20,6 +20,8 @@ export function buildMemoryCandidates(report) {
         kind,
         title,
         summary,
+        primaryProject: session.primaryProjectHint || null,
+        projectLinks: (session.projectHints || []).slice(0, 3),
         detailJson: {
           targetDate: session.targetDate,
           fileName: session.fileName,
@@ -28,6 +30,8 @@ export function buildMemoryCandidates(report) {
           reasons: session.reasons,
           sampleUserText: session.sampleUserText,
           primaryText,
+          primaryProject: session.primaryProjectHint || null,
+          projectHints: (session.projectHints || []).slice(0, 5),
         },
         confidenceScore,
         importanceScore: session.importanceScore,
