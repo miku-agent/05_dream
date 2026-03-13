@@ -34,11 +34,30 @@ function createSupabaseClient(config) {
   return { request };
 }
 
+const PROJECT_LINK_MIN_CONFIDENCE = 0.85;
+
 export async function persistArchiveReport(report, config) {
   const client = createSupabaseClient(config);
   const job = await upsertDreamJob(client, report);
   const sessions = await upsertDreamSessions(client, report, job.id);
   const sessionIdByExternalId = new Map(sessions.map((row) => [row.external_session_id, row.id]));
+
+  const projectRows = buildDreamProjectRows(report);
+  let projects = [];
+  if (projectRows.length > 0) {
+    projects = await upsertDreamProjects(client, projectRows);
+  }
+  const projectIdBySlug = new Map((projects || []).map((row) => [row.slug, row.id]));
+
+  const sessionProjectRows = buildDreamSessionProjectRows(report, sessionIdByExternalId, projectIdBySlug);
+  if (sessionProjectRows.length > 0) {
+    await client.request('dream_session_projects', {
+      method: 'POST',
+      query: '?on_conflict=session_id,project_id',
+      headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
+      body: sessionProjectRows,
+    });
+  }
 
   const messageRows = buildDreamMessages(report, sessionIdByExternalId);
   if (messageRows.length > 0) {
@@ -80,6 +99,8 @@ export async function persistArchiveReport(report, config) {
   return {
     job,
     sessionsInserted: sessions.length,
+    projectsInserted: projectRows.length,
+    sessionProjectsInserted: sessionProjectRows.length,
     messagesInserted: messageRows.length,
     candidatesInserted: candidateRows.length,
     promotionsInserted: promotionRows.length,
@@ -111,6 +132,15 @@ async function upsertDreamJob(client, report) {
   });
 
   return rows[0];
+}
+
+async function upsertDreamProjects(client, rows) {
+  return await client.request('dream_projects', {
+    method: 'POST',
+    query: '?on_conflict=slug',
+    headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
+    body: rows,
+  });
 }
 
 async function upsertDreamSessions(client, report, jobId) {
@@ -145,6 +175,57 @@ async function upsertDreamSessions(client, report, jobId) {
     headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
     body: payload,
   });
+}
+
+function buildDreamProjectRows(report) {
+  const bySlug = new Map();
+
+  for (const session of report.sessions || []) {
+    for (const hint of session.projectHints || []) {
+      if (!hint?.slug) continue;
+      const current = bySlug.get(hint.slug) || {
+        slug: hint.slug,
+        name: hint.label || hint.slug,
+        kind: inferProjectKind(hint.slug),
+        aliases_json: buildProjectAliases(hint),
+        status: 'active',
+      };
+      bySlug.set(hint.slug, current);
+    }
+  }
+
+  return Array.from(bySlug.values());
+}
+
+function buildDreamSessionProjectRows(report, sessionIdByExternalId, projectIdBySlug) {
+  const rows = [];
+
+  for (const session of report.sessions || []) {
+    const sessionId = sessionIdByExternalId.get(session.externalSessionId);
+    if (!sessionId) continue;
+
+    for (const hint of session.projectHints || []) {
+      if (!hint?.slug || (hint.confidence || 0) < PROJECT_LINK_MIN_CONFIDENCE) continue;
+      const projectId = projectIdBySlug.get(hint.slug);
+      if (!projectId) continue;
+
+      rows.push({
+        session_id: sessionId,
+        project_id: projectId,
+        link_source: 'inferred',
+        confidence_score: hint.confidence,
+        primary_project: session.primaryProjectHint?.slug === hint.slug,
+        reason_json: {
+          sources: hint.sources || [],
+          signalTypes: hint.signalTypes || [],
+          matchedTexts: hint.matchedTexts || [],
+          evidenceCount: hint.evidenceCount || 0,
+        },
+      });
+    }
+  }
+
+  return rows;
 }
 
 function buildDreamMessages(report, sessionIdByExternalId) {
@@ -231,6 +312,24 @@ function buildDreamPromotionRows(report, sessionIdByExternalId, candidateIdByFin
   return rows;
 }
 
+
+function buildProjectAliases(hint) {
+  const values = new Set([hint.slug, hint.label].filter(Boolean).map((value) => String(value).trim().toLowerCase()));
+  for (const value of hint.matchedTexts || []) {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (normalized) values.add(normalized);
+  }
+  return Array.from(values).slice(0, 12);
+}
+
+function inferProjectKind(slug) {
+  const value = String(slug || '').toLowerCase();
+  if (value.includes('supabase') || value.includes('infra')) return 'infra';
+  if (value.includes('research')) return 'research';
+  if (value.includes('personal')) return 'personal';
+  if (value.includes('lib') || value.includes('sdk')) return 'library';
+  return 'app';
+}
 
 function inferChannel(fileName) {
   if (fileName.includes('topic-')) return 'discord';

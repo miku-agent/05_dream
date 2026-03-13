@@ -80,7 +80,7 @@ node scripts/dream-memory/nightly.mjs --date 2026-03-12 --dry-run=false --archiv
 
 - Phase 1 project-awareness currently adds `primaryProjectHint`, `projectHints`, and `projectSignals` into discovered session/report data.
 - This step is intentionally non-destructive: it does **not** persist project links to Supabase yet.
-- The next implementation step is persisting high-confidence session-project links.
+- High-confidence session-project persistence is available in the writer path, but requires the v1 project schema extension (`supabase/dream_memory_v1_projects.sql`) to be applied before `--archive=true` is used for that path.
 
 ## Next
 
