@@ -1,3 +1,4 @@
+import { sanitizeApiKey } from './api-utils.mjs';
 import { extractMeaningfulUserText } from './text-cleaning.mjs';
 
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -61,10 +62,6 @@ export async function scoreSessionsWithLLM(sessions, { apiKey, model }) {
   }
 
   return results;
-}
-
-function sanitizeApiKey(text) {
-  return String(text || '').replace(/key=[^&\s"']+/gi, 'key=REDACTED');
 }
 
 function normalizeModelName(model) {

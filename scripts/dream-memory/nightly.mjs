@@ -13,6 +13,8 @@ import { buildPurgePlan } from './src/purge-planner.mjs';
 import { persistArchiveReport } from './src/supabase-writer.mjs';
 import { buildSelectiveEmbeddingPayloads } from './src/embedding-payloads.mjs';
 import { persistEmbeddingReport } from './src/embedding-store.mjs';
+import { generateEmbeddings } from './src/embedding-generator.mjs';
+import { sanitizeApiKey } from './src/api-utils.mjs';
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -101,9 +103,25 @@ async function main() {
 
   let embeddingArchive = null;
   if (config.persistEmbeddings) {
+    let vectorMap = new Map();
+    const isGeminiEmbedding = config.embeddingProvider === 'gemini' && config.geminiApiKey;
+
+    if (isGeminiEmbedding) {
+      try {
+        vectorMap = await generateEmbeddings(embeddingPayloads, {
+          apiKey: config.geminiApiKey,
+          model: config.embeddingModel,
+        });
+      } catch (error) {
+        const safeMsg = sanitizeApiKey(error.message);
+        console.error(`[dream-memory] Embedding generation failed, persisting without vectors: ${safeMsg}`);
+      }
+    }
+
     embeddingArchive = await persistEmbeddingReport(report, config, {
       provider: config.embeddingProvider,
       model: config.embeddingModel,
+      vectorMap,
     });
   }
 
