@@ -1,5 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PROJECT_ROOT = path.resolve(__dirname, '..', '..', '..');
 
 export function parseArgs(argv) {
   const args = {};
@@ -29,6 +33,7 @@ export function parseArgs(argv) {
 }
 
 export function loadConfig(args = {}) {
+  const projectEnv = safeParseEnvFile(path.join(PROJECT_ROOT, '.env'));
   const workspaceRoot = '/Users/bini/.openclaw/workspace';
   const sessionsDir = args['sessions-dir'] || process.env.DREAM_SESSIONS_DIR || '/Users/bini/.openclaw/agents/miku/sessions';
   const memoryRoot = args['memory-root'] || process.env.DREAM_MEMORY_ROOT || workspaceRoot;
@@ -45,6 +50,11 @@ export function loadConfig(args = {}) {
   const embeddingStoreMode = String(args['embedding-store'] || process.env.DREAM_EMBEDDING_STORE || 'supabase').trim().toLowerCase();
   const embeddingOutFile = args['embedding-out-file'] || process.env.DREAM_EMBEDDING_OUT_FILE || '';
   const envBridge = loadSupabaseBridgeEnv(workspaceRoot);
+
+  const geminiApiKey = args['gemini-key'] || process.env.GEMINI_API_KEY || projectEnv.GEMINI_API_KEY || '';
+  const llmModel = args['llm-model'] || process.env.DREAM_LLM_MODEL || projectEnv.DREAM_LLM_MODEL || 'gemini-2.0-flash-lite';
+  const scorerModeRaw = String(args.scorer || process.env.DREAM_SCORER_MODE || projectEnv.DREAM_SCORER_MODE || 'auto').trim().toLowerCase();
+  const scorerMode = resolveScorerMode(scorerModeRaw, geminiApiKey);
 
   return {
     workspaceRoot,
@@ -65,7 +75,16 @@ export function loadConfig(args = {}) {
     knownProjects: loadKnownProjects(workspaceRoot),
     supabaseUrl: process.env.DREAM_SUPABASE_URL || envBridge.supabaseUrl || '',
     supabaseKey: process.env.DREAM_SUPABASE_SERVICE_ROLE_KEY || envBridge.supabaseKey || '',
+    geminiApiKey,
+    llmModel,
+    scorerMode,
   };
+}
+
+function resolveScorerMode(mode, apiKey) {
+  if (mode === 'llm') return 'llm';
+  if (mode === 'heuristic') return 'heuristic';
+  return apiKey ? 'llm' : 'heuristic';
 }
 
 function normalizeDateArg(value) {

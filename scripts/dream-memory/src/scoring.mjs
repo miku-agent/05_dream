@@ -1,3 +1,5 @@
+import { scoreSessionsWithLLM } from './llm-scorer.mjs';
+
 const STRONG_PATTERNS = [
   /기억해/u,
   /앞으로/u,
@@ -24,12 +26,85 @@ const MEDIUM_PATTERNS = [
   /retention/i,
 ];
 
-export function analyzeSessions(sessions, { targetDate }) {
-  return sessions.map((session) => analyzeSession(session, { targetDate }));
+export async function analyzeSessions(sessions, { targetDate, config }) {
+  const scorerMode = config?.scorerMode || 'heuristic';
+
+  if (scorerMode === 'llm' && config?.geminiApiKey) {
+    return analyzeSessionsWithLLM(sessions, { targetDate, config });
+  }
+
+  if (scorerMode === 'llm' && !config?.geminiApiKey) {
+    console.error('[dream-memory] WARNING: scorer=llm but GEMINI_API_KEY is not set, falling back to heuristic');
+  }
+
+  return sessions.map((session) => analyzeSessionHeuristic(session, { targetDate }));
 }
 
-function analyzeSession(session, { targetDate }) {
-  const combinedText = session.messages.map((message) => message.text).join('\n');
+async function analyzeSessionsWithLLM(sessions, { targetDate, config }) {
+  const llmResults = await scoreSessionsWithLLM(sessions, {
+    apiKey: config.geminiApiKey,
+    model: config.llmModel,
+  });
+
+  return llmResults.map(({ session, llmResult, ok, error }) => {
+    const base = buildBaseFields(session, { targetDate });
+
+    if (ok && llmResult) {
+      return {
+        ...base,
+        importanceScore: llmResult.importanceScore,
+        importanceBand: llmResult.importanceBand,
+        promotionDecision: llmResult.promotionDecision,
+        candidateKinds: llmResult.candidateKinds,
+        retentionClass: inferRetentionClass({
+          importanceBand: llmResult.importanceBand,
+          promotionDecision: llmResult.promotionDecision,
+          automationSession: base.automationSession,
+        }),
+        summaryShort: llmResult.summary || buildSummary(session, llmResult.importanceBand),
+        reasons: llmResult.reasons || [],
+        scorerType: 'llm',
+        llmReasoning: llmResult.reasoning,
+        messages: session.messages,
+      };
+    }
+
+    const heuristic = analyzeSessionHeuristic(session, { targetDate });
+    return {
+      ...heuristic,
+      scorerType: 'heuristic-fallback',
+      llmError: String(error || 'unknown').replace(/key=[^&\s"']+/gi, 'key=REDACTED'),
+    };
+  });
+}
+
+function buildBaseFields(session, { targetDate }) {
+  const combinedText = (session.messages || []).map((message) => String(message.text || '')).join('\n');
+  const automationSession = isAutomationSession(session, combinedText);
+  const userMessageRatio = calculateUserMessageRatio(session);
+
+  return {
+    externalSessionId: session.externalSessionId,
+    fileName: session.fileName,
+    filePath: session.filePath,
+    targetDate,
+    startedAt: session.startedAt,
+    lastMessageAt: session.lastMessageAt,
+    messageCount: session.messageCount,
+    charCount: session.charCount,
+    transcriptChecksum: session.transcriptChecksum,
+    sampleUserText: truncate(session.sampleUserText, 240),
+    automationSession,
+    userMessageRatio,
+    roleCounts: session.roleCounts || {},
+    primaryProjectHint: session.primaryProjectHint || null,
+    projectHints: session.projectHints || [],
+    projectSignals: session.projectSignals || [],
+  };
+}
+
+function analyzeSessionHeuristic(session, { targetDate }) {
+  const combinedText = (session.messages || []).map((message) => String(message.text || '')).join('\n');
   const automationSession = isAutomationSession(session, combinedText);
   const userMessageRatio = calculateUserMessageRatio(session);
 
@@ -107,6 +182,7 @@ function analyzeSession(session, { targetDate }) {
       automationSession: automationSession ? 1 : 0,
       userLedSession: userMessageRatio >= 0.2 ? 1 : 0,
     }),
+    scorerType: 'heuristic',
     messages: session.messages,
   };
 }
