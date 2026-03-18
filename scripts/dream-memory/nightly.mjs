@@ -29,7 +29,8 @@ async function main() {
     knownProjects: config.knownProjects,
   });
 
-  const analyzed = analyzeSessions(discovered.sessions, { targetDate: window.date }).map((session) => {
+  const scored = await analyzeSessions(discovered.sessions, { targetDate: window.date, config });
+  const analyzed = scored.map((session) => {
     const candidates = buildMemoryCandidates({ sessions: [session] });
     const effectivePromotionDecision = deriveEffectivePromotionDecision(session.promotionDecision, candidates);
 
@@ -44,9 +45,12 @@ async function main() {
   const purge = buildPurgePlan({ sessions: analyzed, promotions, targetDate: window.date }, config);
   const embeddingPayloads = buildSelectiveEmbeddingPayloads({ sessions: analyzed, promotions });
 
+  const scorerStats = buildScorerStats(analyzed);
+
   const report = {
-    version: 3,
+    version: 4,
     mode: config.dryRun ? 'dry-run' : 'write-ready',
+    scorer: scorerStats,
     targetDate: window.date,
     timeZone: config.timeZone,
     window: {
@@ -107,6 +111,7 @@ async function main() {
     ok: true,
     targetDate: window.date,
     mode: report.mode,
+    scorer: scorerStats,
     outFile: config.dryRun ? null : outFile,
     archivedToSupabase: Boolean(archive),
     embeddingsPersisted: Boolean(embeddingArchive),
@@ -122,6 +127,15 @@ function deriveEffectivePromotionDecision(baseDecision, candidates) {
   if (decisions.has('defer')) return 'defer';
   if (decisions.has('archive_only')) return 'archive_only';
   return baseDecision;
+}
+
+function buildScorerStats(sessions) {
+  const types = {};
+  for (const s of sessions) {
+    const t = s.scorerType || 'unknown';
+    types[t] = (types[t] || 0) + 1;
+  }
+  return { scorerTypes: types, total: sessions.length };
 }
 
 function countDistinctProjects(sessions) {
