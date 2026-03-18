@@ -12,11 +12,12 @@ export async function persistEmbeddingReport(report, config, options = {}) {
   const provider = String(options.provider || config.embeddingProvider || DEFAULT_PROVIDER);
   const model = String(options.model || config.embeddingModel || DEFAULT_MODEL);
   const store = String(options.store || config.embeddingStoreMode || 'supabase').trim().toLowerCase();
+  const vectorMap = options.vectorMap || new Map();
 
   const documentRows = buildEmbeddingDocumentRows(payloads, { provider, model, targetDate: report.targetDate });
 
   if (store === 'file' || store === 'json') {
-    return persistEmbeddingReportToFile(report, config, { provider, model, documentRows });
+    return persistEmbeddingReportToFile(report, config, { provider, model, documentRows, vectorMap });
   }
 
   const client = createSupabaseClient(config);
@@ -39,6 +40,7 @@ export async function persistEmbeddingReport(report, config, options = {}) {
     model,
     targetDate: report.targetDate,
     documentIdBySource,
+    vectorMap,
   });
 
   let embeddings = [];
@@ -51,11 +53,14 @@ export async function persistEmbeddingReport(report, config, options = {}) {
     });
   }
 
+  const vectorsGenerated = embeddingRows.filter((r) => r.status === 'completed').length;
+
   return {
     semantics: 'upsert_returned_rows',
     store: 'supabase',
     provider,
     model,
+    vectorsGenerated,
     rowsRequested: {
       embeddingDocuments: documentRows.length,
       embeddings: embeddingRows.length,
@@ -71,12 +76,14 @@ export async function persistEmbeddingReport(report, config, options = {}) {
 async function persistEmbeddingReportToFile(report, config, options = {}) {
   const outFile = resolveEmbeddingOutFile(report, config);
   const documentRows = options.documentRows || [];
+  const vectorMap = options.vectorMap || new Map();
   const documentIdBySource = new Map(documentRows.map((row) => [buildDocumentLookupKey(row.source_type, row.source_key), row.source_key]));
   const embeddingRows = buildEmbeddingRows(buildSelectiveEmbeddingPayloads(report, options), {
     provider: options.provider,
     model: options.model,
     targetDate: report.targetDate,
     documentIdBySource,
+    vectorMap,
   });
 
   await mkdir(path.dirname(outFile), { recursive: true });
@@ -90,11 +97,14 @@ async function persistEmbeddingReportToFile(report, config, options = {}) {
     embeddings: embeddingRows,
   }, null, 2) + '\n', 'utf8');
 
+  const vectorsGenerated = embeddingRows.filter((r) => r.status === 'completed').length;
+
   return {
     semantics: 'file_snapshot',
     store: 'file',
     provider: options.provider || DEFAULT_PROVIDER,
     model: options.model || DEFAULT_MODEL,
+    vectorsGenerated,
     outFile,
     rowsRequested: {
       embeddingDocuments: documentRows.length,
@@ -154,11 +164,15 @@ export function buildEmbeddingRows(payloads, options = {}) {
   const model = String(options.model || DEFAULT_MODEL);
   const targetDate = options.targetDate || null;
   const documentIdBySource = options.documentIdBySource || new Map();
+  const vectorMap = options.vectorMap || new Map();
 
   return payloads.map((payload) => {
     const sourceType = payload.objectType;
     const sourceKey = buildEmbeddingSourceKey(payload);
     const lookupKey = buildDocumentLookupKey(sourceType, sourceKey);
+    const vectorData = vectorMap.get(payload.objectId);
+    const hasVector = vectorData && vectorData.vector && vectorData.vector.length > 0;
+    const now = new Date().toISOString();
 
     return {
       document_id: documentIdBySource.get(lookupKey) || null,
@@ -168,14 +182,14 @@ export function buildEmbeddingRows(payloads, options = {}) {
       model,
       content_hash: hashText(payload.text),
       payload_fingerprint: buildPayloadFingerprint(payload),
-      dimensions: null,
-      vector_json: null,
-      status: 'pending',
-      requested_at: new Date().toISOString(),
-      generated_at: null,
+      dimensions: hasVector ? vectorData.dimensions : null,
+      vector_json: hasVector ? vectorData.vector : null,
+      status: hasVector ? 'completed' : 'pending',
+      requested_at: now,
+      generated_at: hasVector ? now : null,
       last_error: null,
       audit_json: {
-        mode: 'local-stub',
+        mode: hasVector ? 'gemini-live' : 'local-stub',
         targetDate,
         source: payload.source || {},
         selectedBecause: payload.audit?.selectedBecause || [],

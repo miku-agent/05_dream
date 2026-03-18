@@ -11,32 +11,7 @@ export async function planMemoryRecall({
 } = {}) {
   const normalizedQuery = normalizeText(query || '');
   if (!normalizedQuery) {
-    return {
-      query: String(query || ''),
-      parsed: { normalizedQuery: '', projectHints: [] },
-      items: [],
-      semantic: {
-        status: 'skipped',
-        backend: 'empty_query',
-        provider: semanticProvider?.name || null,
-        model: null,
-        similarityMetric: 'cosine',
-        readySourceCount: 0,
-        candidates: [],
-        nextStep: 'query required before semantic recall can run',
-      },
-      vectorStub: {
-        status: 'skipped',
-        backend: 'empty_query',
-        provider: semanticProvider?.name || null,
-        model: null,
-        similarityMetric: 'cosine',
-        readySourceCount: 0,
-        candidates: [],
-        nextStep: 'query required before vector stub can run',
-      },
-      trace: { steps: ['empty_query'], filters: [], scoring: [] },
-    };
+    return buildEmptyResult(query, semanticProvider);
   }
 
   const queryProjectHints = inferProjectHints({
@@ -46,13 +21,21 @@ export async function planMemoryRecall({
   }).projectHints;
 
   const corpus = buildRecallCorpus(report);
-  const scored = corpus
+  const keywordScored = corpus
     .map((item) => scoreRecallItem(item, normalizedQuery, queryProjectHints))
-    .filter((item) => item.totalScore > 0)
-    .sort((a, b) => b.totalScore - a.totalScore || b.keywordScore - a.keywordScore || a.ref.localeCompare(b.ref))
-    .slice(0, topK);
+    .filter((item) => item.totalScore > 0);
 
-  const items = scored.map((item) => ({
+  const semantic = await retrieveSemanticCandidates({
+    query: normalizedQuery,
+    report,
+    rankedItems: keywordScored.slice(0, topK),
+    topK,
+    provider: semanticProvider,
+  });
+
+  const merged = mergeScores(keywordScored, semantic.candidates, topK);
+
+  const items = merged.map((item) => ({
     ref: item.ref,
     sourceType: item.sourceType,
     title: item.title,
@@ -60,17 +43,10 @@ export async function planMemoryRecall({
     totalScore: item.totalScore,
     metadataScore: item.metadataScore,
     keywordScore: item.keywordScore,
+    semanticScore: item.semanticScore,
     why: item.why,
     audit: item.audit,
   }));
-
-  const semantic = await retrieveSemanticCandidates({
-    query: normalizedQuery,
-    report,
-    rankedItems: items,
-    topK,
-    provider: semanticProvider,
-  });
 
   return {
     query: String(query || ''),
@@ -82,20 +58,118 @@ export async function planMemoryRecall({
     semantic,
     vectorStub: semantic,
     trace: {
-      steps: ['project_detection', 'metadata_filter', 'keyword_overlap', 'score_and_rank', 'semantic_slot_reserved'],
+      steps: buildTraceSteps(semantic),
       filters: [
         queryProjectHints.length > 0
           ? `project-aware filter active: ${queryProjectHints.map((hint) => hint.slug).join(', ')}`
           : 'no project filter',
       ],
-      scoring: [
-        'metadata(project/kind/source)',
-        'lexical overlap(title/summary/content)',
-        'semantic/vector provider slot reserved above lexical ranking',
-        'audit trail preserved',
-      ],
+      scoring: buildTraceScoring(semantic),
     },
   };
+}
+
+function mergeScores(keywordItems, semanticCandidates, topK) {
+  const semanticByRef = new Map(
+    (semanticCandidates || [])
+      .filter((c) => c.vectorScore != null)
+      .map((c) => [c.ref, c])
+  );
+
+  const seenRefs = new Set();
+
+  const merged = keywordItems.map((item) => {
+    seenRefs.add(item.ref);
+    const semantic = semanticByRef.get(item.ref);
+    const vectorScore = semantic?.vectorScore;
+    const semanticScore = vectorScore != null ? Math.round(vectorScore * 100) : 0;
+    const bestContentScore = Math.max(item.keywordScore, semanticScore);
+    const totalScore = Math.max(0, item.metadataScore + bestContentScore);
+    const why = [...item.why];
+
+    if (vectorScore != null) {
+      why.push(`semantic_similarity:${vectorScore.toFixed(3)}`);
+    }
+
+    return {
+      ...item,
+      semanticScore,
+      totalScore,
+      why,
+    };
+  });
+
+  for (const [ref, candidate] of semanticByRef) {
+    if (seenRefs.has(ref)) continue;
+    const semanticScore = Math.round(candidate.vectorScore * 100);
+    merged.push({
+      ref,
+      sourceType: candidate.objectType,
+      title: candidate.objectId,
+      project: candidate.project || null,
+      kind: null,
+      content: null,
+      importanceScore: 0,
+      confidenceScore: 0,
+      metadataScore: 0,
+      keywordScore: 0,
+      semanticScore,
+      totalScore: semanticScore,
+      why: [`semantic_only:${candidate.vectorScore.toFixed(3)}`],
+      audit: { sourceKey: candidate.sourceKey },
+    });
+  }
+
+  return merged
+    .sort((a, b) => b.totalScore - a.totalScore || b.semanticScore - a.semanticScore || a.ref.localeCompare(b.ref))
+    .slice(0, topK);
+}
+
+function buildEmptyResult(query, semanticProvider) {
+  const emptySemanticBlock = {
+    status: 'skipped',
+    backend: 'empty_query',
+    provider: semanticProvider?.name || null,
+    model: null,
+    similarityMetric: 'cosine',
+    readySourceCount: 0,
+    candidates: [],
+    nextStep: 'query required before semantic recall can run',
+  };
+
+  return {
+    query: String(query || ''),
+    parsed: { normalizedQuery: '', projectHints: [] },
+    items: [],
+    semantic: emptySemanticBlock,
+    vectorStub: { ...emptySemanticBlock },
+    trace: { steps: ['empty_query'], filters: [], scoring: [] },
+  };
+}
+
+function buildTraceSteps(semantic) {
+  const steps = ['project_detection', 'metadata_filter', 'keyword_overlap', 'score_and_rank'];
+  if (semantic.status === 'ok') {
+    steps.push('semantic_embedding', 'cosine_similarity', 'score_merge');
+  } else {
+    steps.push('semantic_slot_reserved');
+  }
+  return steps;
+}
+
+function buildTraceScoring(semantic) {
+  const scoring = [
+    'metadata(project/kind/source)',
+    'lexical overlap(title/summary/content)',
+  ];
+  if (semantic.status === 'ok') {
+    scoring.push('semantic cosine similarity(query vs corpus embeddings)');
+    scoring.push('blended: metadataScore + max(keywordScore, semanticScore)');
+  } else {
+    scoring.push('semantic/vector provider slot reserved above lexical ranking');
+  }
+  scoring.push('audit trail preserved');
+  return scoring;
 }
 
 function buildRecallCorpus(report) {
@@ -184,6 +258,7 @@ function scoreRecallItem(item, normalizedQuery, queryProjectHints) {
     ...item,
     metadataScore,
     keywordScore,
+    semanticScore: 0,
     totalScore,
     why,
   };
